@@ -115,10 +115,136 @@ if [[ "$START_PHASE" -le 1 ]]; then
         if [[ "$FRAME_COUNT" -lt 20 ]]; then
             warn "Only $FRAME_COUNT frames extracted. Consider increasing EXTRACT_FPS in config.env."
         fi
+    fi
 
+    # ── Smart frame selection ──────────────────────────────
+    # Cluster all frames by visual similarity; keep only the sharpest
+    # representative from each unique viewpoint.  Discarded frames are
+    # moved to frames_discarded/ so nothing is permanently lost.
+
+    SELECTED_SENTINEL="$FRAMES_DIR/.selected"
+    if [[ -f "$SELECTED_SENTINEL" ]]; then
+        FRAME_COUNT=$(find "$FRAMES_DIR" -name "*.jpg" | wc -l)
+        log "Smart frame selection already done ($FRAME_COUNT frames kept)."
+    else
+        DISCARD_DIR="$PROJECT_DIR/frames_discarded"
+        mkdir -p "$DISCARD_DIR"
+        log "Running smart frame selection (threshold: ${FRAME_SELECT_THRESHOLD})..."
+
+        python3 - "$FRAMES_DIR" "$FRAME_SELECT_THRESHOLD" "$DISCARD_DIR" << 'PYEOF'
+import os, sys, math
+from pathlib import Path
+
+frames_dir   = Path(sys.argv[1])
+threshold    = float(sys.argv[2])
+discard_dir  = Path(sys.argv[3])
+discard_dir.mkdir(exist_ok=True)
+
+frames = sorted(frames_dir.glob("frame_*.jpg"))
+total  = len(frames)
+if total == 0:
+    print("No frames found.")
+    sys.exit(1)
+
+print(f"  Analyzing {total} candidate frames...", flush=True)
+
+# Try cv2 (fast, uses HSV histogram + Laplacian sharpness).
+# Fall back to PIL (slower, uses RGB histogram + luminance variance).
+try:
+    import cv2
+    import numpy as np
+
+    def get_features(path):
+        img = cv2.imread(str(path))
+        if img is None:
+            return None, 0.0
+        hsv  = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        hist = cv2.calcHist([hsv], [0, 1], None, [32, 32], [0, 180, 0, 256])
+        cv2.normalize(hist, hist)
+        gray     = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
+        return hist.flatten(), sharpness
+
+    def cosine_sim(h1, h2):
+        denom = np.linalg.norm(h1) * np.linalg.norm(h2)
+        return float(np.dot(h1, h2) / (denom + 1e-8))
+
+    print("  Using cv2 backend.", flush=True)
+
+except ImportError:
+    try:
+        from PIL import Image
+
+        def get_features(path):
+            img   = Image.open(path).convert("RGB").resize((64, 64))
+            raw   = img.histogram()
+            total = sum(raw) or 1
+            hist  = [v / total for v in raw]
+            gray  = img.convert("L")
+            px    = list(gray.getdata())
+            mean  = sum(px) / len(px)
+            sharpness = sum((p - mean) ** 2 for p in px) / len(px)
+            return hist, sharpness
+
+        def cosine_sim(h1, h2):
+            dot = sum(a * b for a, b in zip(h1, h2))
+            n1  = math.sqrt(sum(a * a for a in h1))
+            n2  = math.sqrt(sum(b * b for b in h2))
+            return dot / (n1 * n2 + 1e-8)
+
+        print("  Using PIL backend (cv2 not found).", flush=True)
+
+    except ImportError:
+        print("ERROR: Neither cv2 nor PIL/Pillow is available.")
+        print("  Install one:  pip install pillow  OR  pip install opencv-python")
+        sys.exit(1)
+
+# Each cluster: [path, histogram, sharpness]
+# Greedy nearest-cluster assignment; replace cluster rep if sharper.
+clusters = []
+
+for i, frame in enumerate(frames):
+    if (i + 1) % 100 == 0 or i == total - 1:
+        print(f"  [{i+1}/{total}] clusters so far: {len(clusters)}", flush=True)
+
+    hist, sharp = get_features(frame)
+    if hist is None:
+        continue
+
+    best_sim = -1.0
+    best_idx = -1
+    for j, (_, ch, _) in enumerate(clusters):
+        s = cosine_sim(hist, ch)
+        if s > best_sim:
+            best_sim = s
+            best_idx = j
+
+    if best_sim >= threshold:
+        # Same viewpoint — keep the sharper frame, discard the other.
+        if sharp > clusters[best_idx][2]:
+            old_path = clusters[best_idx][0]
+            old_path.rename(discard_dir / old_path.name)
+            clusters[best_idx] = [frame, hist, sharp]
+        else:
+            frame.rename(discard_dir / frame.name)
+    else:
+        clusters.append([frame, hist, sharp])
+
+kept      = len(clusters)
+discarded = total - kept
+print(f"\n  Selected {kept} frames, discarded {discarded} near-duplicates.")
+print(f"  Discarded frames kept at: {discard_dir}")
+PYEOF
+
+        touch "$SELECTED_SENTINEL"
+        FRAME_COUNT=$(find "$FRAMES_DIR" -name "*.jpg" | wc -l)
+        log "Frame selection complete: $FRAME_COUNT unique viewpoints kept."
+
+        if [[ "$FRAME_COUNT" -lt 20 ]]; then
+            warn "Only $FRAME_COUNT frames after selection. Try lowering FRAME_SELECT_THRESHOLD in config.env."
+        fi
         if [[ "$FRAME_COUNT" -gt 500 ]]; then
-            warn "$FRAME_COUNT frames extracted. This may slow down COLMAP significantly."
-            warn "Consider reducing EXTRACT_FPS or switching COLMAP_MATCHER to 'sequential' in config.env."
+            warn "$FRAME_COUNT frames after selection. Consider raising FRAME_SELECT_THRESHOLD or switching COLMAP_MATCHER to 'sequential'."
         fi
     fi
 
