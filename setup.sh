@@ -116,20 +116,22 @@ source venv/bin/activate
 
 pip install --upgrade pip
 
-# Install PyTorch with CUDA support
+# Install PyTorch with CUDA support.
+# NOTE: the cu121 index tops out at torch 2.4.0, which requires numpy 1.x.
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
-# Install 3DGS dependencies.
-# IMPORTANT: numpy must stay < 2 -- the prebuilt torch + the CUDA kernels are
-# compiled against numpy 1.x and crash with numpy 2.x ("compiled using NumPy 1.x").
-pip install "numpy<2" plyfile tqdm
+# 3DGS + frame-curation dependencies.
+# IMPORTANT: pin BOTH of these together --
+#   * numpy must stay < 2  (torch 2.4 is compiled against numpy 1.x)
+#   * opencv-python-headless must stay < 5 (opencv 5 requires numpy >= 2 and
+#     would silently upgrade numpy, breaking torch)
+pip install "numpy<2" "opencv-python-headless<5" plyfile tqdm
 
-# Frame-curation script dependencies (OpenCV for sharpness scoring + CLAHE).
-pip install opencv-python-headless
-
-# Build CUDA submodules
-pip install submodules/diff-gaussian-rasterization
-pip install submodules/simple-knn
+# Build the CUDA kernels.
+# --no-build-isolation is required so the build can `import torch` from this
+# venv; otherwise pip builds in a fresh env where torch isn't installed.
+pip install --no-build-isolation submodules/diff-gaussian-rasterization
+pip install --no-build-isolation submodules/simple-knn
 
 deactivate
 cd "$SCRIPT_DIR"
