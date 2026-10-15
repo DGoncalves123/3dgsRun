@@ -293,6 +293,9 @@ if [[ "$START_PHASE" -le 3 ]]; then
             cd "$GS_DIR"
             source venv/bin/activate
 
+            # Reuse fragmented CUDA memory (reduces "reserved but unallocated").
+            export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
             python train.py \
                 -s "$INPUT_DIR" \
                 -m "$ABS_TRAIN_DIR" \
