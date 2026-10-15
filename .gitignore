@@ -1,0 +1,17 @@
+# Local data, tooling, and outputs (regenerated locally, never committed)
+data/
+tools/
+venv/
+.venv/
+_analysis/
+
+# Python
+__pycache__/
+*.pyc
+
+# Large media inputs and model outputs
+*.mp4
+*.mov
+*.ksplat
+*.splat
+*.ply

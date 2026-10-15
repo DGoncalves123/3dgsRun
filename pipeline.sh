@@ -93,158 +93,52 @@ PIPELINE_START=$(date +%s)
 # ══════════════════════════════════════════════════════════
 
 if [[ "$START_PHASE" -le 1 ]]; then
-    phase 1 "Frame Extraction (FFmpeg)"
+    phase 1 "Frame Curation (extract + deblur-gate + CLAHE + dedupe)"
     timer_start
-
-    FRAME_COUNT=$(find "$FRAMES_DIR" -name "*.jpg" 2>/dev/null | wc -l)
-
-    if [[ "$FRAME_COUNT" -gt 0 ]]; then
-        warn "Frames directory already has $FRAME_COUNT images. Skipping extraction."
-        warn "Delete $FRAMES_DIR/*.jpg to re-extract."
-    else
-        log "Extracting frames at ${EXTRACT_FPS} fps with JPEG quality ${JPEG_QUALITY}..."
-
-        ffmpeg -i "$VIDEO_FILE" \
-            -vf "fps=${EXTRACT_FPS}" \
-            -q:v "$JPEG_QUALITY" \
-            "$FRAMES_DIR/frame_%04d.jpg"
-
-        FRAME_COUNT=$(find "$FRAMES_DIR" -name "*.jpg" | wc -l)
-        log "Extracted $FRAME_COUNT frames."
-
-        if [[ "$FRAME_COUNT" -lt 20 ]]; then
-            warn "Only $FRAME_COUNT frames extracted. Consider increasing EXTRACT_FPS in config.env."
-        fi
-    fi
-
-    # ── Smart frame selection ──────────────────────────────
-    # Cluster all frames by visual similarity; keep only the sharpest
-    # representative from each unique viewpoint.  Discarded frames are
-    # moved to frames_discarded/ so nothing is permanently lost.
 
     SELECTED_SENTINEL="$FRAMES_DIR/.selected"
     if [[ -f "$SELECTED_SENTINEL" ]]; then
-        FRAME_COUNT=$(find "$FRAMES_DIR" -name "*.jpg" | wc -l)
-        log "Smart frame selection already done ($FRAME_COUNT frames kept)."
+        FRAME_COUNT=$(find "$FRAMES_DIR" -name "*.jpg" 2>/dev/null | wc -l)
+        log "Frame curation already done ($FRAME_COUNT frames kept)."
+        warn "Delete $FRAMES_DIR/.selected and $FRAMES_DIR/*.jpg to re-curate."
     else
-        DISCARD_DIR="$PROJECT_DIR/frames_discarded"
-        mkdir -p "$DISCARD_DIR"
-        log "Running smart frame selection (threshold: ${FRAME_SELECT_THRESHOLD})..."
+        PY_BIN="$GAUSSIAN_SPLATTING_DIR/venv/bin/python"
+        if [[ ! -x "$PY_BIN" ]]; then
+            error "Python venv not found at $PY_BIN. Run ./setup.sh first."
+        fi
+        if ! "$PY_BIN" -c "import cv2, numpy" 2>/dev/null; then
+            error "opencv-python / numpy missing from the venv. Run ./setup.sh first."
+        fi
 
-        python3 - "$FRAMES_DIR" "$FRAME_SELECT_THRESHOLD" "$DISCARD_DIR" << 'PYEOF'
-import os, sys, math
-from pathlib import Path
+        log "Curating frames (fps=${EXTRACT_FPS}, auto sharpness floor, CLAHE=${FRAME_CLAHE})..."
 
-frames_dir   = Path(sys.argv[1])
-threshold    = float(sys.argv[2])
-discard_dir  = Path(sys.argv[3])
-discard_dir.mkdir(exist_ok=True)
-
-frames = sorted(frames_dir.glob("frame_*.jpg"))
-total  = len(frames)
-if total == 0:
-    print("No frames found.")
-    sys.exit(1)
-
-print(f"  Analyzing {total} candidate frames...", flush=True)
-
-# Try cv2 (fast, uses HSV histogram + Laplacian sharpness).
-# Fall back to PIL (slower, uses RGB histogram + luminance variance).
-try:
-    import cv2
-    import numpy as np
-
-    def get_features(path):
-        img = cv2.imread(str(path))
-        if img is None:
-            return None, 0.0
-        hsv  = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        hist = cv2.calcHist([hsv], [0, 1], None, [32, 32], [0, 180, 0, 256])
-        cv2.normalize(hist, hist)
-        gray     = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        sharpness = cv2.Laplacian(gray, cv2.CV_64F).var()
-        return hist.flatten(), sharpness
-
-    def cosine_sim(h1, h2):
-        denom = np.linalg.norm(h1) * np.linalg.norm(h2)
-        return float(np.dot(h1, h2) / (denom + 1e-8))
-
-    print("  Using cv2 backend.", flush=True)
-
-except ImportError:
-    try:
-        from PIL import Image
-
-        def get_features(path):
-            img   = Image.open(path).convert("RGB").resize((64, 64))
-            raw   = img.histogram()
-            total = sum(raw) or 1
-            hist  = [v / total for v in raw]
-            gray  = img.convert("L")
-            px    = list(gray.getdata())
-            mean  = sum(px) / len(px)
-            sharpness = sum((p - mean) ** 2 for p in px) / len(px)
-            return hist, sharpness
-
-        def cosine_sim(h1, h2):
-            dot = sum(a * b for a, b in zip(h1, h2))
-            n1  = math.sqrt(sum(a * a for a in h1))
-            n2  = math.sqrt(sum(b * b for b in h2))
-            return dot / (n1 * n2 + 1e-8)
-
-        print("  Using PIL backend (cv2 not found).", flush=True)
-
-    except ImportError:
-        print("ERROR: Neither cv2 nor PIL/Pillow is available.")
-        print("  Install one:  pip install pillow  OR  pip install opencv-python")
-        sys.exit(1)
-
-# Each cluster: [path, histogram, sharpness]
-# Greedy nearest-cluster assignment; replace cluster rep if sharper.
-clusters = []
-
-for i, frame in enumerate(frames):
-    if (i + 1) % 100 == 0 or i == total - 1:
-        print(f"  [{i+1}/{total}] clusters so far: {len(clusters)}", flush=True)
-
-    hist, sharp = get_features(frame)
-    if hist is None:
-        continue
-
-    best_sim = -1.0
-    best_idx = -1
-    for j, (_, ch, _) in enumerate(clusters):
-        s = cosine_sim(hist, ch)
-        if s > best_sim:
-            best_sim = s
-            best_idx = j
-
-    if best_sim >= threshold:
-        # Same viewpoint — keep the sharper frame, discard the other.
-        if sharp > clusters[best_idx][2]:
-            old_path = clusters[best_idx][0]
-            old_path.rename(discard_dir / old_path.name)
-            clusters[best_idx] = [frame, hist, sharp]
-        else:
-            frame.rename(discard_dir / frame.name)
-    else:
-        clusters.append([frame, hist, sharp])
-
-kept      = len(clusters)
-discarded = total - kept
-print(f"\n  Selected {kept} frames, discarded {discarded} near-duplicates.")
-print(f"  Discarded frames kept at: {discard_dir}")
-PYEOF
+        "$PY_BIN" "$SCRIPT_DIR/scripts/extract_frames.py" "$VIDEO_FILE" "$FRAMES_DIR" \
+            --fps "$EXTRACT_FPS" \
+            --min-gap-seconds "$FRAME_MIN_GAP_SECONDS" \
+            --max-frames "$FRAME_MAX_FRAMES" \
+            --min-sharpness "$FRAME_MIN_SHARPNESS" \
+            --sharpness-ratio "$FRAME_SHARPNESS_RATIO" \
+            --min-brightness "$FRAME_MIN_BRIGHTNESS" \
+            --clahe "$FRAME_CLAHE" \
+            --clahe-clip "$FRAME_CLAHE_CLIP" \
+            --clahe-grid "$FRAME_CLAHE_GRID" \
+            --denoise "$FRAME_DENOISE" \
+            --unsharp "$FRAME_UNSHARP" \
+            --unsharp-amount "$FRAME_UNSHARP_AMOUNT" \
+            --jpeg-quality "$FRAME_JPEG_QUALITY" \
+            --report "$FRAMES_DIR/selection_report.json"
 
         touch "$SELECTED_SENTINEL"
         FRAME_COUNT=$(find "$FRAMES_DIR" -name "*.jpg" | wc -l)
-        log "Frame selection complete: $FRAME_COUNT unique viewpoints kept."
+        log "Frame curation complete: $FRAME_COUNT curated frames."
 
         if [[ "$FRAME_COUNT" -lt 20 ]]; then
-            warn "Only $FRAME_COUNT frames after selection. Try lowering FRAME_SELECT_THRESHOLD in config.env."
+            warn "Only $FRAME_COUNT frames survived curation."
+            warn "  - Lower FRAME_MIN_SHARPNESS / FRAME_SHARPNESS_RATIO, or raise EXTRACT_FPS,"
+            warn "  - or the video is genuinely too blurry -> re-capture with more light."
         fi
         if [[ "$FRAME_COUNT" -gt 500 ]]; then
-            warn "$FRAME_COUNT frames after selection. Consider raising FRAME_SELECT_THRESHOLD or switching COLMAP_MATCHER to 'sequential'."
+            warn "$FRAME_COUNT frames. Consider raising FRAME_SHARPNESS_RATIO / FRAME_MIN_GAP_SECONDS or setting FRAME_MAX_FRAMES."
         fi
     fi
 
@@ -271,7 +165,10 @@ if [[ "$START_PHASE" -le 2 ]]; then
             --ImageReader.camera_model "$COLMAP_CAMERA_MODEL" \
             --ImageReader.single_camera "$COLMAP_SINGLE_CAMERA" \
             --SiftExtraction.use_gpu 1 \
-            --SiftExtraction.gpu_index "$COLMAP_GPU_INDEX"
+            --SiftExtraction.gpu_index "$COLMAP_GPU_INDEX" \
+            --SiftExtraction.max_num_features "$COLMAP_MAX_FEATURES" \
+            --SiftExtraction.estimate_affine_shape 1 \
+            --SiftExtraction.domain_size_pooling 1
 
         # Step 2b: Feature Matching
         log "Step 2b: Feature matching (${COLMAP_MATCHER})..."
@@ -279,12 +176,14 @@ if [[ "$START_PHASE" -le 2 ]]; then
             colmap exhaustive_matcher \
                 --database_path "$COLMAP_DB" \
                 --SiftMatching.use_gpu 1 \
-                --SiftMatching.gpu_index "$COLMAP_GPU_INDEX"
+                --SiftMatching.gpu_index "$COLMAP_GPU_INDEX" \
+                --SiftMatching.guided_matching "$COLMAP_GUIDED_MATCHING"
         elif [[ "$COLMAP_MATCHER" == "sequential" ]]; then
             colmap sequential_matcher \
                 --database_path "$COLMAP_DB" \
                 --SiftMatching.use_gpu 1 \
                 --SiftMatching.gpu_index "$COLMAP_GPU_INDEX" \
+                --SiftMatching.guided_matching "$COLMAP_GUIDED_MATCHING" \
                 --SequentialMatching.loop_detection 1
         else
             error "Unknown matcher type: $COLMAP_MATCHER. Use 'exhaustive' or 'sequential'."
@@ -297,22 +196,50 @@ if [[ "$START_PHASE" -le 2 ]]; then
             --image_path "$FRAMES_DIR" \
             --output_path "$COLMAP_SPARSE"
 
-        # Verify reconstruction
-        if [[ ! -d "$COLMAP_SPARSE/0" ]]; then
-            error "COLMAP reconstruction failed. No sparse/0 directory found."
+        # COLMAP can split the scene into several disconnected models when
+        # frames are blurry / feature-poor. Pick the LARGEST one instead of
+        # blindly using sparse/0 (which is often a tiny degenerate fragment).
+        BEST_SPARSE=""
+        BEST_COUNT=0
+        MODEL_COUNT=0
+        for model_dir in "$COLMAP_SPARSE"/*/; do
+            [[ -f "$model_dir/images.bin" ]] || continue
+            MODEL_COUNT=$((MODEL_COUNT + 1))
+            CNT=$(colmap model_analyzer --path "$model_dir" 2>/dev/null \
+                  | grep -iE "registered images" | grep -oE '[0-9]+' | head -1 || true)
+            CNT=${CNT:-0}
+            log "  model $model_dir: $CNT registered images"
+            if [[ "$CNT" -gt "$BEST_COUNT" ]]; then
+                BEST_COUNT=$CNT
+                BEST_SPARSE="$model_dir"
+            fi
+        done
+
+        if [[ -z "$BEST_SPARSE" ]]; then
+            error "COLMAP reconstruction failed. No sparse model with images.bin found."
         fi
 
-        # Count registered images
-        log "Reconstruction complete. Checking registration..."
         TOTAL_FRAMES=$(find "$FRAMES_DIR" -name "*.jpg" | wc -l)
-        # Use COLMAP model analyzer to check stats
-        colmap model_analyzer --path "$COLMAP_SPARSE/0" 2>&1 | head -20 || true
+        log "Reconstruction complete. Using largest model: $BEST_SPARSE ($BEST_COUNT/$TOTAL_FRAMES images registered)"
+
+        if [[ "$MODEL_COUNT" -gt 1 ]]; then
+            warn "COLMAP split the scene into $MODEL_COUNT disconnected models."
+            warn "This usually means blurry/feature-poor frames. Try:"
+            warn "  - lower FRAME_SHARPNESS_RATIO / raise EXTRACT_FPS to keep more sharp frames"
+            warn "  - increase FRAME_CLAHE (already on) or add FRAME_DENOISE=1"
+            warn "  - re-capture the video with more light and slower movement"
+        fi
+
+        PCT=$(awk "BEGIN{printf \"%.0f\", ($TOTAL_FRAMES>0 ? $BEST_COUNT*100/$TOTAL_FRAMES : 0)}")
+        if [[ "$BEST_COUNT" -lt 20 ]] || [[ "$PCT" -lt 40 ]]; then
+            warn "Only $PCT% of frames registered. The reconstruction will be poor."
+        fi
 
         # Step 2d: Image Undistortion
         log "Step 2d: Image undistortion..."
         colmap image_undistorter \
             --image_path "$FRAMES_DIR" \
-            --input_path "$COLMAP_SPARSE/0" \
+            --input_path "$BEST_SPARSE" \
             --output_path "$COLMAP_UNDISTORTED" \
             --output_type COLMAP
 

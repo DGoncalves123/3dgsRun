@@ -119,8 +119,13 @@ pip install --upgrade pip
 # Install PyTorch with CUDA support
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 
-# Install 3DGS dependencies
-pip install plyfile tqdm
+# Install 3DGS dependencies.
+# IMPORTANT: numpy must stay < 2 -- the prebuilt torch + the CUDA kernels are
+# compiled against numpy 1.x and crash with numpy 2.x ("compiled using NumPy 1.x").
+pip install "numpy<2" plyfile tqdm
+
+# Frame-curation script dependencies (OpenCV for sharpness scoring + CLAHE).
+pip install opencv-python-headless
 
 # Build CUDA submodules
 pip install submodules/diff-gaussian-rasterization
