@@ -136,10 +136,12 @@ cd "$SCRIPT_DIR"
 
 # ── Install Node.js dependencies for ksplat converter ─────
 
-log "Installing Node.js dependencies for ksplat converter..."
+log "Installing Node.js dependencies and building ksplat converter..."
 
 cd "$GAUSSIAN_SPLATS_3D_DIR"
 npm install
+# create-ksplat.js imports from build/, so the library must be built too.
+npm run build
 cd "$SCRIPT_DIR"
 
 # ── Create data directory ─────────────────────────────────
