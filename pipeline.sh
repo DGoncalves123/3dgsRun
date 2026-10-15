@@ -205,8 +205,10 @@ if [[ "$START_PHASE" -le 2 ]]; then
         for model_dir in "$COLMAP_SPARSE"/*/; do
             [[ -f "$model_dir/images.bin" ]] || continue
             MODEL_COUNT=$((MODEL_COUNT + 1))
-            CNT=$(colmap model_analyzer --path "$model_dir" 2>/dev/null \
-                  | grep -iE "registered images" | grep -oE '[0-9]+' | head -1 || true)
+            # model_analyzer logs to stderr, and its line is
+            # "Registered images: N", so capture stderr and grab the number.
+            CNT=$(colmap model_analyzer --path "$model_dir" 2>&1 \
+                  | grep -ioE "registered images: *[0-9]+" | grep -oE "[0-9]+" | head -1)
             CNT=${CNT:-0}
             log "  model $model_dir: $CNT registered images"
             if [[ "$CNT" -gt "$BEST_COUNT" ]]; then
@@ -242,6 +244,14 @@ if [[ "$START_PHASE" -le 2 ]]; then
             --input_path "$BEST_SPARSE" \
             --output_path "$COLMAP_UNDISTORTED" \
             --output_type COLMAP
+
+        # graphdeco train.py reads sparse/0/{cameras,images,points3D}.bin, but
+        # image_undistorter writes them directly under sparse/. Move them.
+        if [[ -d "$COLMAP_UNDISTORTED/sparse" ]] && [[ ! -d "$COLMAP_UNDISTORTED/sparse/0" ]]; then
+            mkdir -p "$COLMAP_UNDISTORTED/sparse/0"
+            find "$COLMAP_UNDISTORTED/sparse" -maxdepth 1 -type f \
+                -exec mv {} "$COLMAP_UNDISTORTED/sparse/0/" \;
+        fi
 
         log "COLMAP processing complete."
         log "Undistorted output: $COLMAP_UNDISTORTED"
