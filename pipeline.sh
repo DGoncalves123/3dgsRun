@@ -126,7 +126,7 @@ if [[ "$START_PHASE" -le 1 ]]; then
             --unsharp "$FRAME_UNSHARP" \
             --unsharp-amount "$FRAME_UNSHARP_AMOUNT" \
             --jpeg-quality "$FRAME_JPEG_QUALITY" \
-            --report "$FRAMES_DIR/selection_report.json"
+            --report "$PROJECT_DIR/selection_report.json"
 
         touch "$SELECTED_SENTINEL"
         FRAME_COUNT=$(find "$FRAMES_DIR" -name "*.jpg" | wc -l)
@@ -164,7 +164,7 @@ if [[ "$START_PHASE" -le 2 ]]; then
             --image_path "$FRAMES_DIR" \
             --ImageReader.camera_model "$COLMAP_CAMERA_MODEL" \
             --ImageReader.single_camera "$COLMAP_SINGLE_CAMERA" \
-            --SiftExtraction.use_gpu 1 \
+            --SiftExtraction.use_gpu "$COLMAP_USE_GPU" \
             --SiftExtraction.gpu_index "$COLMAP_GPU_INDEX" \
             --SiftExtraction.max_num_features "$COLMAP_MAX_FEATURES" \
             --SiftExtraction.estimate_affine_shape 1 \
@@ -175,13 +175,13 @@ if [[ "$START_PHASE" -le 2 ]]; then
         if [[ "$COLMAP_MATCHER" == "exhaustive" ]]; then
             colmap exhaustive_matcher \
                 --database_path "$COLMAP_DB" \
-                --SiftMatching.use_gpu 1 \
+                --SiftMatching.use_gpu "$COLMAP_USE_GPU" \
                 --SiftMatching.gpu_index "$COLMAP_GPU_INDEX" \
                 --SiftMatching.guided_matching "$COLMAP_GUIDED_MATCHING"
         elif [[ "$COLMAP_MATCHER" == "sequential" ]]; then
             colmap sequential_matcher \
                 --database_path "$COLMAP_DB" \
-                --SiftMatching.use_gpu 1 \
+                --SiftMatching.use_gpu "$COLMAP_USE_GPU" \
                 --SiftMatching.gpu_index "$COLMAP_GPU_INDEX" \
                 --SiftMatching.guided_matching "$COLMAP_GUIDED_MATCHING" \
                 --SequentialMatching.loop_detection 1
